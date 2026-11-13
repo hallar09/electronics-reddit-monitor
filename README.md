@@ -1,69 +1,35 @@
-# Electronics Industry Reddit Monitor
+# Electronics Discussion Monitor for Reddit
 
-A tool that monitors Reddit for discussions about electronics components, procurement, supply chain, and hardware engineering. Designed for industry professionals who need to track emerging trends, component shortages, and community sentiment across relevant subreddits.
+A Python prototype that finds recent public Reddit submissions matching electronics-related keywords, including component shortages, procurement, PCB design, and component sourcing.
 
-## What it does
+## Purpose and audience
 
-- Discovers relevant subreddits for electronics, procurement, and hardware engineering topics
-- Monitors recent posts and discussions matching configurable keywords
-- Filters content by date range so you only see recent activity
-- Exports matched posts to JSON for downstream analysis or reporting
+- This project is intended solely for the developer’s personal, non-commercial use as a Reddit reader interested in electronics and hardware engineering.
+- It helps locate recent discussions about components, PCB design, availability, and sourcing. Results link back to the original Reddit discussions.
+- Exported data will remain on the developer’s computer. It will not be shared with coworkers, customers, websites, or AI services. The project is not intended for commercial market intelligence, customer reporting, advertising, or AI training.
+- Earlier descriptions referring to industry professionals and market intelligence did not accurately reflect the intended use and are superseded by this description.
+- The current implementation is a prototype. API approval and appropriate data-handling controls are required before deployment.
 
-## Use case
+## Current functionality
 
-Electronics buyers, hardware engineers, and supply chain analysts use this to:
-- Track component shortage signals early (e.g. MLCC, semiconductor lead times)
-- Monitor discussions about specific parts, distributors, or manufacturers
-- Stay current on community sentiment around supply chain disruptions
-- Research how engineers approach component selection and sourcing
+- Reads up to 100 recent submissions per configured subreddit using PRAW and Reddit’s OAuth API.
+- Filters submissions by age, minimum score, and keyword matches in their titles and text.
+- Saves matching submissions to a local JSON file with links to the original Reddit discussions.
+- Does not retrieve comment bodies, post content, send messages, vote, or perform moderation actions.
+- Does not include AI analysis or model training.
 
-## Setup
+## Access requirements
 
-### 1. Install dependencies
+API access requires Reddit’s explicit approval for the intended use case before running the tool. Creating API credentials alone does not establish approval. Commercial use requires appropriate written authorization from Reddit.
 
-```bash
-pip install -r requirements.txt
-```
+## Current data handling
 
-### 2. Create a Reddit app
+The prototype exports post IDs, subreddit names, titles, author usernames, scores, comment counts, permalinks, up to 2,000 characters of post text, matched keywords, and creation timestamps.
 
-1. Go to https://www.reddit.com/prefs/apps
-2. Click **create another app**
-3. Select **script** as the app type
-4. Set redirect URI to `http://localhost:8080`
-5. Copy your **client ID** (below the app name) and **client secret**
+Files are saved locally as `output/results_YYYY-MM-DD.json`. The search lookback setting controls which posts are retrieved; it is not a retention or deletion setting.
 
-### 3. Configure
+Automatic expiry and synchronization with content deleted or removed on Reddit are not currently implemented. The intended audience, permitted downstream uses, retention period, and deletion process must be finalized before deployment.
 
-Copy `.env.example` to `.env` and fill in your credentials:
+## Scope
 
-```bash
-cp .env.example .env
-```
-
-### 4. Run
-
-```bash
-python monitor.py
-```
-
-Results are saved to `output/results_YYYY-MM-DD.json`.
-
-## Configuration
-
-Edit `.env` to control:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DAYS_BACK` | `7` | How many days back to search |
-| `KEYWORDS` | *(see .env.example)* | Comma-separated keywords to track |
-| `SUBREDDITS` | *(see .env.example)* | Subreddits to monitor |
-| `MIN_SCORE` | `1` | Minimum post score to include |
-
-## Rate limits
-
-This app uses Reddit's official OAuth API and respects the 100 requests/minute rate limit. It adds delays between requests to stay well within limits.
-
-## License
-
-MIT
+Subreddits and keywords are explicitly configured. Automatic subreddit discovery and sentiment analysis are not currently implemented.
