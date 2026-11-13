@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
-"""
-Electronics Industry Reddit Monitor
-Tracks component, procurement, and hardware engineering discussions on Reddit.
-"""
+"""Personal, non-commercial electronics reading list for Reddit."""
 
+import argparse
 import json
 import os
-import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -15,106 +12,210 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-REDDIT_CLIENT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
-REDDIT_CLIENT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
-REDDIT_USERNAME      = os.getenv("REDDIT_USERNAME", "")
-REDDIT_PASSWORD      = os.getenv("REDDIT_PASSWORD", "")
-REDDIT_USER_AGENT    = os.getenv("REDDIT_USER_AGENT", f"electronics-reddit-monitor/1.0 (by /u/{os.getenv('REDDIT_USERNAME', 'user')})")
+ALLOWED_SUBREDDITS = (
+    "electronics",
+    "AskElectronics",
+    "embedded",
+    "PrintedCircuitBoard",
+)
 
-DAYS_BACK  = int(os.getenv("DAYS_BACK", "7"))
-MIN_SCORE  = int(os.getenv("MIN_SCORE", "1"))
-KEYWORDS   = [k.strip().lower() for k in os.getenv("KEYWORDS", "").split(",") if k.strip()]
-SUBREDDITS = [s.strip() for s in os.getenv("SUBREDDITS", "electronics,embedded,AskElectronics").split(",") if s.strip()]
+# Seven days is this project's chosen maximum, not a Reddit policy claim.
+MAX_RETENTION_DAYS = 7
+OUTPUT_DIR = Path(__file__).resolve().parent / "output"
 
 
-def connect() -> praw.Reddit:
-    return praw.Reddit(
-        client_id=REDDIT_CLIENT_ID,
-        client_secret=REDDIT_CLIENT_SECRET,
-        username=REDDIT_USERNAME,
-        password=REDDIT_PASSWORD,
-        user_agent=REDDIT_USER_AGENT,
+def purge_exports():
+    """Remove this tool's generated exports, including old dated exports."""
+    if not OUTPUT_DIR.exists():
+        return
+
+    paths = list(OUTPUT_DIR.glob("results_*.json"))
+    paths.extend([
+        OUTPUT_DIR / "results.json",
+        OUTPUT_DIR / "results.json.tmp",
+    ])
+
+    for path in paths:
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+
+
+def get_settings():
+    days_back = int(os.getenv("DAYS_BACK", "7"))
+    if not 1 <= days_back <= MAX_RETENTION_DAYS:
+        raise ValueError("DAYS_BACK must be between 1 and 7.")
+
+    keywords = [
+        value.strip().lower()
+        for value in os.getenv("KEYWORDS", "").split(",")
+        if value.strip()
+    ]
+    if not keywords:
+        raise ValueError("Set at least one KEYWORDS value in .env.")
+
+    allowed = {name.lower(): name for name in ALLOWED_SUBREDDITS}
+    requested = [
+        value.strip()
+        for value in os.getenv(
+            "SUBREDDITS", ",".join(ALLOWED_SUBREDDITS)
+        ).split(",")
+        if value.strip()
+    ]
+
+    if not requested:
+        raise ValueError("Configure at least one subreddit.")
+
+    unsupported = [
+        name for name in requested if name.lower() not in allowed
+    ]
+    if unsupported:
+        raise ValueError(
+            "Subreddits outside the supported scope: "
+            + ", ".join(unsupported)
+        )
+
+    subreddits = list(dict.fromkeys(
+        allowed[name.lower()] for name in requested
+    ))
+
+    return (
+        days_back,
+        int(os.getenv("MIN_SCORE", "1")),
+        keywords,
+        subreddits,
     )
 
 
-def matches_keywords(text: str) -> list[str]:
-    lower = text.lower()
-    return [kw for kw in KEYWORDS if kw in lower]
+def connect():
+    client_id = os.getenv("REDDIT_CLIENT_ID", "")
+    client_secret = os.getenv("REDDIT_CLIENT_SECRET", "")
+    user_agent = os.getenv("REDDIT_USER_AGENT", "")
+
+    if not all((client_id, client_secret, user_agent)):
+        raise ValueError(
+            "Set REDDIT_CLIENT_ID, REDDIT_CLIENT_SECRET, "
+            "and REDDIT_USER_AGENT in .env."
+        )
+
+    # Application-only authentication for public, read-only access.
+    # No Reddit account password is required by this script.
+    reddit = praw.Reddit(
+        client_id=client_id,
+        client_secret=client_secret,
+        user_agent=user_agent,
+    )
+    reddit.read_only = True
+    return reddit
 
 
-def fetch_subreddit(reddit: praw.Reddit, subreddit_name: str, cutoff: float) -> list[dict]:
+def fetch_subreddit(reddit, name, cutoff, min_score, keywords):
     results = []
-    try:
-        sub = reddit.subreddit(subreddit_name)
-        for post in sub.new(limit=100):
-            if post.created_utc < cutoff:
-                break
-            if post.score < MIN_SCORE:
-                continue
-            combined = f"{post.title} {post.selftext}"
-            matched = matches_keywords(combined)
-            if not matched:
-                continue
-            results.append({
-                "id": post.id,
-                "subreddit": subreddit_name,
-                "title": post.title,
-                "author": str(post.author) if post.author else "[deleted]",
-                "score": post.score,
-                "num_comments": post.num_comments,
-                "url": f"https://reddit.com{post.permalink}",
-                "body": post.selftext[:2000],
-                "matched_keywords": matched,
-                "created_utc": post.created_utc,
-                "created_date": datetime.fromtimestamp(post.created_utc, tz=timezone.utc).strftime("%Y-%m-%d"),
-            })
-        time.sleep(0.6)  # stay within rate limits
-    except Exception as e:
-        print(f"  Error on r/{subreddit_name}: {e}")
+
+    for post in reddit.subreddit(name).new(limit=100):
+        if post.created_utc < cutoff:
+            continue
+
+        body = post.selftext or ""
+
+        # Conservative exclusion: also skip posts whose author is gone.
+        if post.author is None:
+            continue
+        if body.strip().lower() in {"[deleted]", "[removed]"}:
+            continue
+        if getattr(post, "removed_by_category", None):
+            continue
+        if post.score < min_score:
+            continue
+
+        # Text is used transiently for matching, never written to exports.
+        text = f"{post.title} {body}".lower()
+        if not any(keyword in text for keyword in keywords):
+            continue
+
+        results.append({
+            "id": post.id,
+            "subreddit": name,
+            "url": f"https://www.reddit.com{post.permalink}",
+            "created_utc": post.created_utc,
+        })
+
     return results
 
 
 def main():
-    print("Electronics Industry Reddit Monitor")
-    print(f"Monitoring {len(SUBREDDITS)} subreddits for {len(KEYWORDS)} keywords")
-    print(f"Date range: last {DAYS_BACK} days\n")
+    parser = argparse.ArgumentParser(
+        description="Create a personal electronics reading list."
+    )
+    parser.add_argument(
+        "--purge",
+        action="store_true",
+        help="Delete generated exports without accessing Reddit.",
+    )
+    args = parser.parse_args()
 
-    if not REDDIT_CLIENT_ID or not REDDIT_CLIENT_SECRET:
-        print("ERROR: Set REDDIT_CLIENT_ID and REDDIT_CLIENT_SECRET in .env")
-        return
+    # Clear legacy exports before authentication or network access.
+    # If cleanup fails, stop instead of leaving stale exports unnoticed.
+    try:
+        purge_exports()
+    except OSError:
+        print("Cleanup failed. Check permissions on the output folder.")
+        return 1
 
-    reddit = connect()
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=DAYS_BACK)).timestamp()
+    if args.purge:
+        print("Generated exports deleted.")
+        return 0
 
-    all_posts = []
-    seen_ids: set = set()
+    if os.getenv("REDDIT_ACCESS_APPROVED", "").lower() != "true":
+        print(
+            "API access is disabled. Only set REDDIT_ACCESS_APPROVED=true "
+            "after Reddit explicitly approves this use case."
+        )
+        return 1
 
-    for subreddit_name in SUBREDDITS:
-        print(f"  r/{subreddit_name} ...", end=" ", flush=True)
-        posts = fetch_subreddit(reddit, subreddit_name, cutoff)
-        new_posts = [p for p in posts if p["id"] not in seen_ids]
-        for p in new_posts:
-            seen_ids.add(p["id"])
-        all_posts.extend(new_posts)
-        print(f"{len(new_posts)} matched")
+    try:
+        days_back, min_score, keywords, subreddits = get_settings()
+        cutoff = (
+            datetime.now(timezone.utc) - timedelta(days=days_back)
+        ).timestamp()
 
-    all_posts.sort(key=lambda p: p["created_utc"], reverse=True)
+        posts_by_id = {}
+        with connect() as reddit:
+            for name in subreddits:
+                for post in fetch_subreddit(
+                    reddit, name, cutoff, min_score, keywords
+                ):
+                    posts_by_id[post["id"]] = post
 
-    out_dir = Path("output")
-    out_dir.mkdir(exist_ok=True)
-    date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    out_path = out_dir / f"results_{date_str}.json"
-    out_path.write_text(json.dumps(all_posts, indent=2, ensure_ascii=False), encoding="utf-8")
+        results = sorted(
+            posts_by_id.values(),
+            key=lambda item: item["created_utc"],
+            reverse=True,
+        )
 
-    print(f"\nFound {len(all_posts)} posts total")
-    print(f"Saved to {out_path}")
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        temporary = OUTPUT_DIR / "results.json.tmp"
+        destination = OUTPUT_DIR / "results.json"
 
-    if all_posts:
-        print("\nTop matches:")
-        for p in all_posts[:5]:
-            print(f"  [{p['subreddit']}] {p['title'][:80]}")
-            print(f"    {p['url']}")
+        # Restrict newly created export files to the current OS user.
+        descriptor = os.open(
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(results, handle, indent=2)
+            handle.write("\n")
+
+        temporary.replace(destination)
+        print(f"Saved {len(results)} links to {destination}")
+        return 0
+
+    except Exception as exc:
+        # Do not preserve partial exports after a failed refresh.
+        purge_exports()
+        print(f"Refresh failed ({type(exc).__name__}); no export retained.")
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())))
